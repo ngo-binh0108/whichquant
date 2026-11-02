@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "whichquant"
+dynamic = ["version"]
+description = "Which GGUF quant fits your GPU? Checks every quant in a Hugging Face repo against your VRAM and RAM, reading only the file headers."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "ngo-binh0108" }]
+keywords = ["gguf", "llama.cpp", "koboldcpp", "quantization", "vram", "llm", "huggingface"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "gguf"]
+
+[project.scripts]
+whichquant = "whichquant.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ngo-binh0108/whichquant"
+
+[tool.hatch.version]
+path = "src/whichquant/__init__.py"
+
+[tool.ruff]
+line-length = 140
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
