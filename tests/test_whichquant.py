@@ -298,3 +298,63 @@ def test_cli_json(tmp_path, capsys):
     assert cli.main([str(path), "--gpu", "0.001", "--ram", "16", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["quants"][0]["fit"] in ("partial", "cpu") and data["layers"] == 4
+
+
+# --- vision projectors --------------------------------------------------------
+
+
+def test_smallest_projector():
+    files = [("m-Q4_K_M.gguf", 8), ("sub/mmproj-F32.gguf", 4), ("sub/mmproj-F16.gguf", 2), ("mmproj-notes.txt", 1)]
+    assert hub.smallest_projector(files) == ("mmproj-F16.gguf", 2)
+    assert hub.smallest_projector(files[:1]) is None
+
+
+def vision_repo(tmp_path, monkeypatch, projector_size):
+    md, tensors = model(n_layer=8, n_embd=1024, ff=4096, vocab=2000)
+    path = tmp_path / "m-Q4_K_M.gguf"
+    path.write_bytes(gguf_bytes(md, tensors))
+
+    def load(models, repo, revision="main"):
+        for m in models:
+            m.headers.append(read_local(str(path)))
+
+    files = [("m-Q4_K_M.gguf", path.stat().st_size), ("mmproj-F16.gguf", projector_size)]
+    monkeypatch.setattr(hub, "list_repo", lambda repo, revision: files)
+    monkeypatch.setattr(hub, "load_repo_headers", load)
+
+
+def run_json(capsys, *args):
+    assert cli.main(["org/m-GGUF", "--ram", "16", "--json", *args]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_vision_projector_is_counted_on_the_first_gpu(tmp_path, monkeypatch, capsys):
+    vision_repo(tmp_path, monkeypatch, GiB // 8)
+    plain = run_json(capsys, "--gpu", "8")
+    seen = run_json(capsys, "--gpu", "8", "--vision")
+    assert seen["vision_projector"] == {"file": "mmproj-F16.gguf", "bytes": GiB // 8, "on_gpu": True}
+    assert seen["quants"][0]["needed_bytes"] - plain["quants"][0]["needed_bytes"] == GiB // 8
+    assert seen["quants"][0]["vram_bytes"][0] - plain["quants"][0]["vram_bytes"][0] == GiB // 8
+    assert plain["vision_projector"] is None
+
+
+def test_vision_projector_can_push_a_quant_off_the_gpu(tmp_path, monkeypatch, capsys):
+    vision_repo(tmp_path, monkeypatch, 1)
+    used = run_json(capsys, "--gpu", "8")["quants"][0]["vram_bytes"][0]
+    vision_repo(tmp_path, monkeypatch, used)
+    gpu = str((used * 1.5) / GiB + 1)  # 1 GB is the default reserve
+    assert run_json(capsys, "--gpu", gpu)["quants"][0]["fit"] == "gpu"
+    assert run_json(capsys, "--gpu", gpu, "--vision")["quants"][0]["fit"] != "gpu"
+
+
+def test_vision_goes_to_ram_without_a_gpu(tmp_path, monkeypatch, capsys):
+    vision_repo(tmp_path, monkeypatch, GiB // 8)
+    assert run_json(capsys, "--gpu", "0", "--vision")["vision_projector"]["on_gpu"] is False
+
+
+def test_vision_needs_a_repo(tmp_path):
+    md, tensors = model()
+    path = tmp_path / "tiny-Q8_0.gguf"
+    path.write_bytes(gguf_bytes(md, tensors))
+    with pytest.raises(SystemExit):
+        cli.main([str(path), "--vision"])

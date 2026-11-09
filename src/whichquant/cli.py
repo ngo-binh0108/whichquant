@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reserve", type=float, default=1.0, help="GB to keep free on each GPU (default 1, like llama.cpp --fit)")
     ap.add_argument("--ubatch", type=int, default=512, help="llama.cpp -ub, sets the compute buffer size (default 512)")
     ap.add_argument("-q", "--quant", help="only show quants whose name contains this, with a full breakdown")
+    ap.add_argument("--vision", action="store_true", help="also count the repo's smallest vision projector (mmproj file)")
     ap.add_argument("--revision", default="main", help="repo branch or commit")
     ap.add_argument("--json", action="store_true", help="print the results as JSON")
     ap.add_argument("-V", "--version", action="version", version=f"whichquant {__version__}")
@@ -79,12 +80,20 @@ def main(argv: list[str] | None = None) -> int:
     source = args.model.strip()
     url = re.match(r"https?://(?:www\.)?(?:huggingface\.co|hf\.co)/([^/]+/[^/?#]+)", source)
     repo = url.group(1) if url else source
+    projector = None
     if Path(source).is_file():
+        if args.vision:
+            ap.error("--vision needs a Hugging Face repo, to find the mmproj file")
         models, repo = [hub.local_model(source)], None
     else:
         if repo.count("/") != 1:
             ap.error(f"{source!r} is neither a file nor a Hugging Face repo like org/name")
-        models = hub.group_models(hub.list_repo(repo, args.revision))
+        files = hub.list_repo(repo, args.revision)
+        models = hub.group_models(files)
+        if args.vision:
+            projector = hub.smallest_projector(files)
+            if projector is None:
+                print(f"{repo} has no mmproj file, so no vision projector is counted", file=sys.stderr)
         if args.quant:
             models = [m for m in models if args.quant.lower() in m.name.lower()]
         if not models:
@@ -93,10 +102,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"reading {len(models)} GGUF header(s) from {repo} ...", file=sys.stderr)
         hub.load_repo_headers(models, repo, args.revision)
 
+    # llama.cpp loads the projector on the first GPU, next to the model
+    projector_gpu = bool(projector) and bool(gpus) and gpus[0] >= projector[1]
+    if projector_gpu:
+        gpus[0] -= projector[1]
+    elif projector:
+        ram -= projector[1]
+
     rows = []
     for m in models:
         lay = layout(m.header, m.tensors, args.kv)
         p = plan(lay, args.ctx, gpus, ram, args.ubatch)
+        if projector:
+            p.total += projector[1]
+            if projector_gpu:
+                p.vram[0] += projector[1]
+            else:
+                p.ram += projector[1]
         best_ctx = max_context(lay, gpus, ram, args.ubatch) if p.verdict == "gpu" else 0
         rows.append((m, lay, p, best_ctx))
 
@@ -112,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
                     "kv_cache": args.kv,
                     "gpus": [{"name": d.name, "usable_bytes": g} for d, g in zip(devices, gpus)],
                     "ram_bytes": ram,
+                    "vision_projector": {"file": projector[0], "bytes": projector[1], "on_gpu": projector_gpu} if projector else None,
                     "quants": [
                         {
                             "quant": m.quant,
@@ -139,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{lay0.arch} | {lay0.n_layer} layers{moe} | trained context {ctx_label(lay0.n_ctx_train)} | context {args.ctx} | KV {args.kv}")
     for note in lay0.notes:
         print(f"  {note}")
+    if projector:
+        print(f"vision projector: {projector[0]}, {gib(projector[1])} GiB on {devices[0].name if projector_gpu else 'RAM'}, counted below")
     if devices:
         cards = " + ".join(f"{d.name} {gib(g)}" for d, g in zip(devices, gpus))
         print(f"GPU usable: {cards} GiB | RAM usable: {gib(ram)} GiB")
