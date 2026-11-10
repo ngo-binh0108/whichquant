@@ -145,6 +145,15 @@ def group_models(files: list[tuple[str, int]]) -> list[ModelFile]:
     return sorted(unique.values(), key=lambda m: m.size)
 
 
+def smallest_projector(files: list[tuple[str, int]]) -> tuple[str, int] | None:
+    """(file name, size) of the smallest vision projector (mmproj) in a repo, if it has one."""
+    found = [(size, path.rsplit("/", 1)[-1]) for path, size in files if "mmproj" in path.lower() and path.endswith(".gguf")]
+    if not found:
+        return None
+    size, name = min(found)
+    return name, size
+
+
 def file_url(repo: str, path: str, revision: str = "main") -> str:
     return f"{HF_ENDPOINT}/{repo}/resolve/{urllib.parse.quote(revision, safe='')}/{urllib.parse.quote(path)}"
 

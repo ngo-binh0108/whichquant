@@ -60,6 +60,7 @@ whichquant bartowski/Qwen_Qwen3-32B-GGUF -c 65536 --kv q8_0           # long con
 whichquant unsloth/GLM-4.5-Air-GGUF -q Q4_K_M         # one quant, with a full breakdown and commands
 whichquant ./models/my-model.gguf                     # a local file
 whichquant unsloth/Qwen3-8B-GGUF --json               # machine-readable
+whichquant ggml-org/gemma-3-4b-it-GGUF --vision       # also count the vision projector
 ```
 
 With `-q` you also get the memory per GPU and ready-to-run commands:
@@ -81,6 +82,7 @@ Qwen3-30B-A3B-Instruct-2507-UD-Q4_K_XL.gguf: weights 16.5 GiB (embeddings 0.2 in
 | `--reserve` | `1` | GB kept free on each GPU, like llama.cpp `--fit` |
 | `--ubatch` | `512` | llama.cpp `-ub`, which sets the compute buffer size |
 | `-q, --quant` | all | only quants whose name contains this, with a breakdown |
+| `--vision` | off | also count the repo's smallest vision projector (`mmproj` file) |
 | `--revision` | `main` | repo branch or commit |
 | `--json` | off | JSON output |
 
@@ -102,7 +104,7 @@ It has no dependencies beyond the Python standard library.
 - **Placement** follows llama.cpp's defaults: token embeddings in RAM, layers split across GPUs in
   proportion to their free memory, and the output layer on the last GPU.
 
-Not counted: vision projectors (`mmproj` files), speculative-decoding draft models, and several
+Not counted: vision projectors (`mmproj` files) unless you pass `--vision`, speculative-decoding draft models, and several
 parallel sequences (`-np`) with a non-unified cache. Recent llama.cpp and KoboldCpp builds pick
 `-ngl` and `--n-cpu-moe` themselves at load time (`--fit`). whichquant answers the earlier
 question: which file to download.
