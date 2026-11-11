@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from whichquant import __version__, hardware, hub
-from whichquant.estimate import CACHE_TYPES, GiB, layout, max_context, plan
+from whichquant.estimate import CACHE_TYPES, GiB, layout, make_room, max_context, plan
 
 VERDICTS = {
     "gpu": "all on GPU",
@@ -56,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ubatch", type=int, default=512, help="llama.cpp -ub, sets the compute buffer size (default 512)")
     ap.add_argument("-q", "--quant", help="only show quants whose name contains this, with a full breakdown")
     ap.add_argument("--vision", action="store_true", help="also count the repo's smallest vision projector (mmproj file)")
+    ap.add_argument(
+        "--draft",
+        metavar="MODEL",
+        help="also count a speculative-decoding draft model: a .gguf, org/name (picks Q8_0) or org/name:QUANT",
+    )
     ap.add_argument("--revision", default="main", help="repo branch or commit")
     ap.add_argument("--json", action="store_true", help="print the results as JSON")
     ap.add_argument("-V", "--version", action="version", version=f"whichquant {__version__}")
@@ -102,6 +107,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"reading {len(models)} GGUF header(s) from {repo} ...", file=sys.stderr)
         hub.load_repo_headers(models, repo, args.revision)
 
+    draft = draft_lay = None
+    if args.draft:
+        print(f"reading the draft model {args.draft} ...", file=sys.stderr)
+        draft = hub.load_draft(args.draft)
+        draft_lay = layout(draft.header, draft.tensors, "f16")  # llama.cpp's -ctkd/-ctvd default to f16
+
     # llama.cpp loads the projector on the first GPU, next to the model
     projector_gpu = bool(projector) and bool(gpus) and gpus[0] >= projector[1]
     if projector_gpu:
@@ -112,14 +123,20 @@ def main(argv: list[str] | None = None) -> int:
     rows = []
     for m in models:
         lay = layout(m.header, m.tensors, args.kv)
-        p = plan(lay, args.ctx, gpus, ram, args.ubatch)
+        room = make_room(gpus, ram, draft_lay, args.ctx, args.ubatch)
+        p = plan(lay, args.ctx, room.gpus, room.ram, args.ubatch)
+        if draft:
+            p.total += sum(room.draft_vram) + room.draft_ram
+            p.ram += room.draft_ram
+            if p.verdict != "no":
+                p.vram = [v + s for v, s in zip(p.vram, room.draft_vram)]
         if projector:
             p.total += projector[1]
             if projector_gpu:
                 p.vram[0] += projector[1]
             else:
                 p.ram += projector[1]
-        best_ctx = max_context(lay, gpus, ram, args.ubatch) if p.verdict == "gpu" else 0
+        best_ctx = max_context(lay, gpus, ram, args.ubatch, draft=draft_lay) if p.verdict == "gpu" else 0
         rows.append((m, lay, p, best_ctx))
 
     lay0 = rows[0][1]
@@ -135,6 +152,13 @@ def main(argv: list[str] | None = None) -> int:
                     "gpus": [{"name": d.name, "usable_bytes": g} for d, g in zip(devices, gpus)],
                     "ram_bytes": ram,
                     "vision_projector": {"file": projector[0], "bytes": projector[1], "on_gpu": projector_gpu} if projector else None,
+                    "draft_model": {
+                        "file": draft.name,
+                        "file_bytes": draft.size,
+                        "vocab_matches": draft_lay.n_vocab == lay0.n_vocab,
+                    }
+                    if draft
+                    else None,
                     "quants": [
                         {
                             "quant": m.quant,
@@ -164,6 +188,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {note}")
     if projector:
         print(f"vision projector: {projector[0]}, {gib(projector[1])} GiB on {devices[0].name if projector_gpu else 'RAM'}, counted below")
+    if draft:
+        room = make_room(gpus, ram, draft_lay, args.ctx, args.ubatch)
+        need = sum(room.draft_vram) + room.draft_ram
+        where = "the GPU" if room.on_gpu else "RAM (it does not fit on the GPU, so it would rarely speed anything up)"
+        print(f"draft model: {draft.name}, {gib(need)} GiB with its cache, on {where}, counted below")
+        if draft_lay.n_vocab != lay0.n_vocab:
+            print(
+                f"  its vocabulary ({draft_lay.n_vocab:,} tokens) differs from the model's ({lay0.n_vocab:,}): "
+                "speculative decoding needs a draft from the same model family"
+            )
     if devices:
         cards = " + ".join(f"{d.name} {gib(g)}" for d, g in zip(devices, gpus))
         print(f"GPU usable: {cards} GiB | RAM usable: {gib(ram)} GiB")
@@ -211,10 +245,12 @@ def main(argv: list[str] | None = None) -> int:
             file = m.paths[0].split("/")[-1]
             ngl = 99 if p.gpu_layers > lay.n_layer else p.gpu_layers
             kv = f" -ctk {args.kv} -ctv {args.kv}" if args.kv != "f16" else ""
-            print(f"  llama-server -m {file} {flags(p, args.ctx, lay.n_layer)}{kv}")
+            md = f" -md {Path(draft.paths[0]).name} -ngld 99" if draft else ""
+            print(f"  llama-server -m {file} {flags(p, args.ctx, lay.n_layer)}{kv}{md}")
             print(
                 f"  koboldcpp --model {file} --gpulayers {ngl} --contextsize {args.ctx}"
                 f"{f' --moecpu {p.cpu_moe}' if p.cpu_moe else ''}{f' --quantkv {args.kv}' if kv else ''}"
+                f"{f' --draftmodel {Path(draft.paths[0]).name}' if draft else ''}"
             )
     print("\nWeights are exact; the KV cache follows llama.cpp's sizing; the compute buffer is an estimate.")
     if any(p.verdict in ("moe", "partial") for _, _, p, _ in rows):
