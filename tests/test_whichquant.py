@@ -1,11 +1,12 @@
 import io
 import json
 import struct
+from pathlib import Path
 
 import pytest
 
 from whichquant import cli, hub
-from whichquant.estimate import GiB, layout, max_context, plan
+from whichquant.estimate import GiB, layout, make_room, max_context, plan
 from whichquant.gguf import GGML_TYPES, GGUFError, SkippedStrings, read_header, read_local
 
 # --- a minimal GGUF writer -------------------------------------------------
@@ -358,3 +359,85 @@ def test_vision_needs_a_repo(tmp_path):
     path.write_bytes(gguf_bytes(md, tensors))
     with pytest.raises(SystemExit):
         cli.main([str(path), "--vision"])
+
+
+# --- speculative-decoding draft models ------------------------------------------
+
+
+def draft_file(tmp_path, vocab=2000, name="d-Q8_0.gguf"):
+    md, tensors = model(n_layer=2, n_embd=512, ff=1024, vocab=vocab)
+    path = tmp_path / name
+    path.write_bytes(gguf_bytes(md, tensors))
+    return path
+
+
+def test_pick_draft_prefers_q8_then_the_largest_below_16_bits():
+    models = [hub.ModelFile(f"d-{q}.gguf", [], size, q) for size, q in ((1, "Q4_K_M"), (2, "Q6_K"), (3, "Q8_0"), (4, "F16"))]
+    assert hub.pick_draft(models).quant == "Q8_0"
+    assert hub.pick_draft(models, "q4_k_m").quant == "Q4_K_M"
+    assert hub.pick_draft(models[:2] + models[3:]).quant == "Q6_K"
+    assert hub.pick_draft(models[3:]).quant == "F16"
+    assert hub.pick_draft(models, "IQ2_XS") is None
+
+
+def test_load_draft_reads_one_quant_of_a_repo(tmp_path, monkeypatch):
+    path = draft_file(tmp_path)
+    files = [("d-Q4_K_M.gguf", 10), ("d-Q8_0.gguf", 20), ("d-F16.gguf", 40)]
+    read = []
+    monkeypatch.setattr(hub, "list_repo", lambda repo, revision="main": files)
+    monkeypatch.setattr(hub, "load_headers", lambda m, repo, revision="main": read.append(m.name) or m)
+    assert hub.load_draft("org/d-GGUF").quant == "Q8_0"
+    assert hub.load_draft("org/d-GGUF:Q4_K_M").quant == "Q4_K_M"
+    assert read == ["d-Q8_0.gguf", "d-Q4_K_M.gguf"]
+    with pytest.raises(SystemExit):
+        hub.load_draft("org/d-GGUF:Q2_K")
+    with pytest.raises(SystemExit):
+        hub.load_draft("not-a-repo")
+    assert hub.load_draft(str(path)).quant == "Q8_0"
+
+
+def test_make_room_splits_the_draft_like_the_model():
+    lay = _lay()
+    room = make_room([6 * GiB, 2 * GiB], 16 * GiB, lay, 4096)
+    need = sum(room.draft_vram)
+    assert room.on_gpu and room.draft_vram[0] == 3 * room.draft_vram[1]
+    assert room.gpus == [6 * GiB - room.draft_vram[0], 2 * GiB - room.draft_vram[1]]
+    assert room.ram == 16 * GiB - lay.input_bytes
+    assert need == sum(lay.layer_bytes) + lay.output_bytes + int(lay.kv_bytes(4096)) + lay.compute_bytes(512, 4096)
+    off = make_room([need // 2], 16 * GiB, lay, 4096)
+    assert not off.on_gpu and off.gpus == [need // 2] and off.draft_ram == need + lay.input_bytes
+    assert make_room([GiB], GiB, None, 4096).gpus == [GiB]
+
+
+def test_draft_is_counted_with_the_model(tmp_path, monkeypatch, capsys):
+    vision_repo(tmp_path, monkeypatch, 1)
+    draft = str(draft_file(tmp_path))
+    plain = run_json(capsys, "--gpu", "8")["quants"][0]
+    seen = run_json(capsys, "--gpu", "8", "--draft", draft)
+    drafted = seen["quants"][0]
+    h = header_of(*model(n_layer=2, n_embd=512, ff=1024, vocab=2000))
+    lay = layout(h, h.tensors, "f16")
+    room = make_room([7 * GiB], int(16 * GiB * 0.9), lay, 8192)
+    assert seen["draft_model"] == {"file": "d-Q8_0.gguf", "file_bytes": Path(draft).stat().st_size, "vocab_matches": True}
+    assert drafted["needed_bytes"] - plain["needed_bytes"] == sum(room.draft_vram) + room.draft_ram
+    assert drafted["vram_bytes"][0] - plain["vram_bytes"][0] == room.draft_vram[0]
+    assert drafted["max_gpu_context"] <= plain["max_gpu_context"]
+
+
+def test_draft_can_push_a_quant_off_the_gpu(tmp_path, monkeypatch, capsys):
+    vision_repo(tmp_path, monkeypatch, 1)
+    draft = str(draft_file(tmp_path))
+    used = run_json(capsys, "--gpu", "8")["quants"][0]["vram_bytes"][0]
+    gpu = str(used * 1.02 / GiB + 1)
+    assert run_json(capsys, "--gpu", gpu)["quants"][0]["fit"] == "gpu"
+    assert run_json(capsys, "--gpu", gpu, "--draft", draft)["quants"][0]["fit"] != "gpu"
+
+
+def test_draft_commands_and_vocab_warning(tmp_path, monkeypatch, capsys):
+    vision_repo(tmp_path, monkeypatch, 1)
+    draft = str(draft_file(tmp_path, vocab=1500, name="other-Q8_0.gguf"))
+    assert cli.main(["org/m-GGUF", "--gpu", "8", "--ram", "16", "-q", "Q4", "--draft", draft]) == 0
+    out = capsys.readouterr().out
+    assert "draft model: other-Q8_0.gguf" in out and "on the GPU" in out
+    assert "its vocabulary (1,500 tokens) differs from the model's (2,000)" in out
+    assert "-md other-Q8_0.gguf -ngld 99" in out and "--draftmodel other-Q8_0.gguf" in out

@@ -61,6 +61,7 @@ whichquant unsloth/GLM-4.5-Air-GGUF -q Q4_K_M         # one quant, with a full b
 whichquant ./models/my-model.gguf                     # a local file
 whichquant unsloth/Qwen3-8B-GGUF --json               # machine-readable
 whichquant ggml-org/gemma-3-4b-it-GGUF --vision       # also count the vision projector
+whichquant unsloth/Qwen3-32B-GGUF --draft unsloth/Qwen3-0.6B-GGUF   # and a speculative-decoding draft model
 ```
 
 With `-q` you also get the memory per GPU and ready-to-run commands:
@@ -83,6 +84,7 @@ Qwen3-30B-A3B-Instruct-2507-UD-Q4_K_XL.gguf: weights 16.5 GiB (embeddings 0.2 in
 | `--ubatch` | `512` | llama.cpp `-ub`, which sets the compute buffer size |
 | `-q, --quant` | all | only quants whose name contains this, with a breakdown |
 | `--vision` | off | also count the repo's smallest vision projector (`mmproj` file) |
+| `--draft` | none | a draft model for speculative decoding: a `.gguf`, `org/name` (its Q8_0) or `org/name:QUANT` |
 | `--revision` | `main` | repo branch or commit |
 | `--json` | off | JSON output |
 
@@ -104,10 +106,30 @@ It has no dependencies beyond the Python standard library.
 - **Placement** follows llama.cpp's defaults: token embeddings in RAM, layers split across GPUs in
   proportion to their free memory, and the output layer on the last GPU.
 
-Not counted: vision projectors (`mmproj` files) unless you pass `--vision`, speculative-decoding draft models, and several
+Not counted: vision projectors (`mmproj` files) unless you pass `--vision`, draft models unless you pass `--draft`, and several
 parallel sequences (`-np`) with a non-unified cache. Recent llama.cpp and KoboldCpp builds pick
 `-ngl` and `--n-cpu-moe` themselves at load time (`--fit`). whichquant answers the earlier
 question: which file to download.
+
+### Draft models
+
+With `--draft`, the draft model is counted fully on the GPU (`-ngld 99`), split across GPUs like the main model, with
+its own f16 KV cache of the same context: that is what llama-server does unless you set `-cd`, `-ctkd` and `-ctvd`.
+At long context that cache can outweigh the draft itself. For Qwen3-0.6B at `-c 32768` it is 3.5 GiB next to 0.6 GiB
+of Q8_0 weights, which on a 24 GB card moves Qwen3-32B Q4_K_M from 57 to 46 layers on the GPU:
+
+```
+$ whichquant unsloth/Qwen3-32B-GGUF --gpu 24 --ram 64 -c 32768 -q Q4_K_M --draft unsloth/Qwen3-0.6B-GGUF
+draft model: Qwen3-0.6B-Q8_0.gguf, 4.5 GiB with its cache, on the GPU, counted below
+...
+Q4_K_M             18.4       31.3  46/65 layers on GPU             -ngl 46 -c 32768
+...
+  llama-server -m Qwen3-32B-Q4_K_M.gguf -ngl 46 -c 32768 -md Qwen3-0.6B-Q8_0.gguf -ngld 99
+```
+
+Splitting the main model between GPU and RAM usually costs more speed than the draft wins back, so a draft is most
+useful when both fit on the GPU. whichquant also warns when the draft's vocabulary differs from the model's, as with
+a Llama draft for a Qwen model.
 
 If an estimate is off for your setup, please open an issue with the model, your command and
 llama.cpp's log lines (`model buffer size`, `KV buffer size`, `compute buffer size`).
