@@ -296,13 +296,45 @@ def plan(lay: Layout, n_ctx: int, gpus: list[int], ram: int, n_ubatch: int = 512
     return Plan("no", 0, 0, [0] * len(gpus), cpu_ram, total, kv_total, compute, 0)
 
 
-def max_context(lay: Layout, gpus: list[int], ram: int, n_ubatch: int = 512, step: int = 1024) -> int:
-    """Largest context (multiple of `step`, up to the training length) that fits fully on the GPUs."""
+@dataclass
+class Room:
+    """The GPU and RAM left for the main model once a draft model is loaded."""
+
+    gpus: list[int]
+    ram: int
+    draft_vram: list[int]  # bytes the draft takes on each GPU
+    draft_ram: int
+    on_gpu: bool
+
+
+def make_room(gpus: list[int], ram: int, draft: Layout | None, n_ctx: int, n_ubatch: int = 512) -> Room:
+    """Load a speculative-decoding draft first, fully offloaded (-ngld 99), split across the GPUs like the model.
+
+    llama.cpp gives the draft its own KV cache of the same context. Its token embeddings stay in RAM, as for any
+    model. A draft that does not fit on the GPUs is counted in RAM, though it rarely speeds anything up there.
+    """
+    if draft is None:
+        return Room(gpus, ram, [0] * len(gpus), 0, False)
+    weights = sum(draft.layer_bytes) + draft.output_bytes
+    need = int(weights + draft.kv_bytes(n_ctx, n_ubatch) + draft.compute_bytes(n_ubatch, n_ctx))
+    total = sum(gpus)
+    if total and need <= total:
+        share = [need * g // total for g in gpus]
+        return Room([g - s for g, s in zip(gpus, share)], ram - draft.input_bytes, share, draft.input_bytes, True)
+    return Room(gpus, ram - need - draft.input_bytes, [0] * len(gpus), need + draft.input_bytes, False)
+
+
+def max_context(lay: Layout, gpus: list[int], ram: int, n_ubatch: int = 512, step: int = 1024, draft: Layout | None = None) -> int:
+    """Largest context (multiple of `step`, up to the training length) that fits fully on the GPUs.
+
+    With a draft model, the draft has to fit on the GPUs as well, with its own cache of that context.
+    """
     limit = lay.n_ctx_train or 131072
     best, lo, hi = 0, 1, max(1, limit // step)
     while lo <= hi:
         mid = (lo + hi) // 2
-        if plan(lay, mid * step, gpus, ram, n_ubatch).verdict == "gpu":
+        room = make_room(gpus, ram, draft, mid * step, n_ubatch)
+        if (draft is None or room.on_gpu) and plan(lay, mid * step, room.gpus, room.ram, n_ubatch).verdict == "gpu":
             best, lo = mid * step, mid + 1
         else:
             hi = mid - 1
