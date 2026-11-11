@@ -234,3 +234,27 @@ def local_model(path: str) -> ModelFile:
     parts = sorted(p.parent.glob(f"{m['stem']}-*-of-{m['count']}.gguf")) if m else [p]
     model = ModelFile(m["stem"] if m else p.name, [str(x) for x in parts], sum(x.stat().st_size for x in parts), quant_label(p.name))
     return load_headers(model, None)
+
+
+def pick_draft(models: list[ModelFile], quant: str = "") -> ModelFile | None:
+    """The quant asked for, or Q8_0: a small draft model loses much of its accuracy at 4 bits, and with it its speed-up.
+    Without a Q8_0, the largest file below 16 bits."""
+    if quant:
+        exact = [m for m in models if m.quant.lower() == quant.lower()]
+        return (exact or [m for m in models if quant.lower() in m.name.lower()] or [None])[0]
+    q8 = [m for m in models if m.quant == "Q8_0"]
+    small = [m for m in models if m.quant not in ("BF16", "F16", "F32")]
+    return (q8 or small[-1:] or models[:1] or [None])[0]
+
+
+def load_draft(ref: str) -> ModelFile:
+    """A draft model from a local .gguf, a repo (org/name) or one quant of a repo (org/name:Q4_K_M)."""
+    if Path(ref).is_file():
+        return local_model(ref)
+    repo, _, quant = ref.strip().partition(":")
+    if repo.count("/") != 1:
+        raise SystemExit(f"--draft {ref!r} is neither a file nor a Hugging Face repo like org/name or org/name:Q8_0")
+    model = pick_draft(group_models(list_repo(repo)), quant)
+    if model is None:
+        raise SystemExit(f"no GGUF files{' matching ' + quant if quant else ''} in {repo}")
+    return load_headers(model, repo)
