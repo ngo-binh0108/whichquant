@@ -46,13 +46,19 @@ def _request(url: str, headers: dict[str, str] | None = None):
         return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60)
     except urllib.error.HTTPError as err:
         if err.code in (401, 403):
+            # the Hub also answers 401 for a repo that does not exist
             raise SystemExit(
-                f"{url}: access denied (HTTP {err.code}). For a gated or private repo, accept its licence "
-                "on huggingface.co and set HF_TOKEN."
+                f"{url}: not found, or access denied (HTTP {err.code}). Check the repo name; for a gated or "
+                "private repo, accept its licence on huggingface.co and set HF_TOKEN."
             ) from None
         if err.code == 404:
             raise SystemExit(f"{url}: not found. Check the repo name and revision.") from None
-        raise
+        if err.code == 429:
+            raise SystemExit(f"{url}: rate limited (HTTP 429). Wait a minute, or set HF_TOKEN for a higher limit.") from None
+        raise SystemExit(f"{url}: the server answered HTTP {err.code}. Try again later.") from None
+    except OSError as err:  # URLError, timeouts, refused or reset connections
+        reason = getattr(err, "reason", None) or err
+        raise SystemExit(f"{url}: cannot connect ({reason}). Check your network connection.") from None
 
 
 class HttpReader:

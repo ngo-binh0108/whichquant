@@ -1,6 +1,8 @@
 import io
 import json
 import struct
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -315,6 +317,28 @@ def test_bad_numbers_are_usage_errors(tmp_path, capsys, bad):
     with pytest.raises(SystemExit) as exc:
         cli.main([str(path), "--ram", "16", *bad])
     assert exc.value.code == 2 and bad[0] in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "error, message",
+    [
+        (urllib.error.URLError(OSError("Name or service not known")), "cannot connect (Name or service not known)"),
+        (TimeoutError("timed out"), "cannot connect (timed out)"),
+        (urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None), "rate limited"),
+        (urllib.error.HTTPError("u", 503, "Unavailable", {}, None), "HTTP 503. Try again later"),
+        (urllib.error.HTTPError("u", 401, "Unauthorized", {}, None), "not found, or access denied"),
+    ],
+    # HTTPError objects can't name themselves on Python 3.9, so name the cases here.
+    ids=["dns", "timeout", "http-429", "http-503", "http-401"],
+)
+def test_network_errors_are_one_line(monkeypatch, error, message):
+    def fail(request, timeout):
+        raise error
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    with pytest.raises(SystemExit) as exc:
+        hub._request(hub.HF_ENDPOINT + "/api/models/org/m")
+    assert message in str(exc.value.code)
 
 
 def test_cli_json(tmp_path, capsys):
