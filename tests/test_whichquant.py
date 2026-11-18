@@ -304,6 +304,19 @@ def test_koboldcpp_command_only_uses_cache_types_it_accepts(tmp_path, capsys):
     assert "koboldcpp --model" not in out and "koboldcpp has no q4_1 KV cache" in out
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [["--gpu", "abc"], ["--gpu", "-8"], ["--gpu", ","], ["--ubatch", "0"], ["--reserve", "-1"], ["--ram", "-4"]],
+)
+def test_bad_numbers_are_usage_errors(tmp_path, capsys, bad):
+    md, tensors = model(n_layer=8, n_embd=1024, ff=4096, vocab=2000)
+    path = tmp_path / "tiny-Q4_K_M.gguf"
+    path.write_bytes(gguf_bytes(md, tensors))
+    with pytest.raises(SystemExit) as exc:
+        cli.main([str(path), "--ram", "16", *bad])
+    assert exc.value.code == 2 and bad[0] in capsys.readouterr().err
+
+
 def test_cli_json(tmp_path, capsys):
     md, tensors = model()
     path = tmp_path / "tiny-Q8_0.gguf"
