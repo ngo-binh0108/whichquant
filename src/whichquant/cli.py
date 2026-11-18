@@ -20,6 +20,10 @@ VERDICTS = {
 }
 
 
+# What KoboldCpp's --quantkv accepts; llama.cpp has more cache types.
+KOBOLDCPP_KV = ("f16", "bf16", "q8_0", "q5_1", "q4_0")
+
+
 def parse_sizes(text: str) -> list[float]:
     return [float(x) for x in re.split(r"[,+ ]+", text.strip()) if x]
 
@@ -247,11 +251,14 @@ def main(argv: list[str] | None = None) -> int:
             kv = f" -ctk {args.kv} -ctv {args.kv}" if args.kv != "f16" else ""
             md = f" -md {Path(draft.paths[0]).name} -ngld 99" if draft else ""
             print(f"  llama-server -m {file} {flags(p, args.ctx, lay.n_layer)}{kv}{md}")
-            print(
-                f"  koboldcpp --model {file} --gpulayers {ngl} --contextsize {args.ctx}"
-                f"{f' --moecpu {p.cpu_moe}' if p.cpu_moe else ''}{f' --quantkv {args.kv}' if kv else ''}"
-                f"{f' --draftmodel {Path(draft.paths[0]).name}' if draft else ''}"
-            )
+            if args.kv in KOBOLDCPP_KV:
+                print(
+                    f"  koboldcpp --model {file} --gpulayers {ngl} --contextsize {args.ctx}"
+                    f"{f' --moecpu {p.cpu_moe}' if p.cpu_moe else ''}{f' --quantkv {args.kv}' if kv else ''}"
+                    f"{f' --draftmodel {Path(draft.paths[0]).name}' if draft else ''}"
+                )
+            else:
+                print(f"  koboldcpp has no {args.kv} KV cache (--quantkv takes {', '.join(KOBOLDCPP_KV)})")
     print("\nWeights are exact; the KV cache follows llama.cpp's sizing; the compute buffer is an estimate.")
     if any(p.verdict in ("moe", "partial") for _, _, p, _ in rows):
         print("Recent llama.cpp and KoboldCpp builds tune -ngl and --n-cpu-moe themselves (--fit); the flags above are a starting point.")

@@ -292,6 +292,18 @@ def test_cli_on_local_file(tmp_path, capsys):
     assert "Q4_K_M" in out and "all on GPU" in out and "-ngl 99 -c 2048" in out
 
 
+def test_koboldcpp_command_only_uses_cache_types_it_accepts(tmp_path, capsys):
+    md, tensors = model(n_layer=8, n_embd=1024, ff=4096, vocab=2000)
+    path = tmp_path / "tiny-Q4_K_M.gguf"
+    path.write_bytes(gguf_bytes(md, tensors))
+    assert cli.main([str(path), "--gpu", "8", "--ram", "16", "-c", "2048", "--kv", "q8_0", "--quant", "Q4_K_M"]) == 0
+    assert "--quantkv q8_0" in capsys.readouterr().out
+    assert cli.main([str(path), "--gpu", "8", "--ram", "16", "-c", "2048", "--kv", "q4_1", "--quant", "Q4_K_M"]) == 0
+    out = capsys.readouterr().out
+    assert "-ctk q4_1 -ctv q4_1" in out  # llama.cpp has it
+    assert "koboldcpp --model" not in out and "koboldcpp has no q4_1 KV cache" in out
+
+
 def test_cli_json(tmp_path, capsys):
     md, tensors = model()
     path = tmp_path / "tiny-Q8_0.gguf"
