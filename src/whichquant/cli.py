@@ -72,12 +72,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.ctx < 1:
         ap.error("--ctx must be positive")
+    if args.ubatch < 1:
+        ap.error("--ubatch must be positive")
+    for flag, value in (("--ram", args.ram), ("--reserve", args.reserve)):
+        if value is not None and value < 0:
+            ap.error(f"{flag} cannot be negative")
+    if args.gpu is not None:
+        try:
+            sizes = parse_sizes(args.gpu)
+        except ValueError:
+            ap.error(f"--gpu takes sizes in GB such as 24 or 16,16, not {args.gpu!r}")
+        if not sizes or any(g < 0 for g in sizes):
+            ap.error(f"--gpu takes sizes in GB such as 24 or 16,16, not {args.gpu!r}")
 
     # hardware
     devices, ram_total, _ = hardware.detect()
     unified = bool(devices) and devices[0].name.startswith("Apple")
     if args.gpu is not None:
-        devices = [hardware.Device(f"GPU {i}", int(g * GiB), int(g * GiB)) for i, g in enumerate(parse_sizes(args.gpu)) if g > 0]
+        devices = [hardware.Device(f"GPU {i}", int(g * GiB), int(g * GiB)) for i, g in enumerate(sizes) if g > 0]
         unified = False
     if args.ram is not None:
         ram_total = int(args.ram * GiB)
